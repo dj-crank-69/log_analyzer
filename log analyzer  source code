@@ -1,0 +1,280 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from tkcalendar import DateEntry
+import pandas as pd
+import re
+from datetime import datetime, timedelta
+import requests
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+LOG_PATTERN = re.compile(r'(?P<ip>\S+) - - \[(?P<timestamp>.*?)\] "(?P<method>\S+) .*?" (?P<response>\d{3})')
+
+class DDoSAnalyzer:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Log Analyzer")
+        self.data = None
+        self.filtered_data = None
+
+        ttk.Button(root, text="Open Log File", command=self.load_log).pack(pady=10)
+
+        filter_frame = ttk.LabelFrame(root, text="Filter by Date & Time")
+        filter_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(filter_frame, text="Start Date:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.start_date = DateEntry(filter_frame, width=12, background='darkblue', foreground='white', borderwidth=2)
+        self.start_date.grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(filter_frame, text="Start Time:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        self.start_hour = ttk.Spinbox(filter_frame, from_=0, to=23, width=3, format="%02.0f")
+        self.start_minute = ttk.Spinbox(filter_frame, from_=0, to=59, width=3, format="%02.0f")
+        self.start_second = ttk.Spinbox(filter_frame, from_=0, to=59, width=3, format="%02.0f")
+        self.start_hour.grid(row=0, column=3, padx=2)
+        self.start_minute.grid(row=0, column=4, padx=2)
+        self.start_second.grid(row=0, column=5, padx=2)
+
+        ttk.Label(filter_frame, text="End Date:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.end_date = DateEntry(filter_frame, width=12, background='darkblue', foreground='white', borderwidth=2)
+        self.end_date.grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(filter_frame, text="End Time:").grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        self.end_hour = ttk.Spinbox(filter_frame, from_=0, to=23, width=3, format="%02.0f")
+        self.end_minute = ttk.Spinbox(filter_frame, from_=0, to=59, width=3, format="%02.0f")
+        self.end_second = ttk.Spinbox(filter_frame, from_=0, to=59, width=3, format="%02.0f")
+        self.end_hour.grid(row=1, column=3, padx=2)
+        self.end_minute.grid(row=1, column=4, padx=2)
+        self.end_second.grid(row=1, column=5, padx=2)
+
+        ttk.Button(root, text="Apply Filter", command=self.filter_datetime).pack(pady=5)
+
+        tree_frame = ttk.Frame(root)
+        tree_frame.pack(expand=True, fill='both', padx=10, pady=10)
+
+        self.tree_scroll_y = tk.Scrollbar(tree_frame, orient="vertical")
+        self.tree_scroll_y.pack(side="right", fill="y")
+        self.tree_scroll_x = tk.Scrollbar(tree_frame, orient="horizontal")
+        self.tree_scroll_x.pack(side="bottom", fill="x")
+
+        self.tree = ttk.Treeview(tree_frame, columns=('Timestamp', 'IP', 'Method', 'Response'),
+                                 show='headings',
+                                 yscrollcommand=self.tree_scroll_y.set,
+                                 xscrollcommand=self.tree_scroll_x.set)
+        for col in ('Timestamp', 'IP', 'Method', 'Response'):
+            self.tree.heading(col, text=col)
+            self.tree.column(col, anchor="center")
+        self.tree.pack(expand=True, fill="both")
+        self.tree_scroll_y.config(command=self.tree.yview)
+        self.tree_scroll_x.config(command=self.tree.xview)
+
+        ttk.Button(root, text="Detect Traffic Spike", command=self.detect_spike).pack(pady=5)
+        ttk.Button(root, text="Detect IP Abuse", command=self.detect_ip_abuse).pack(pady=5)
+        ttk.Button(root, text="Export to CSV", command=self.export_csv).pack(pady=5)
+        ttk.Button(root, text="Clear Log", command=self.clear_logs).pack(pady=5)
+        ttk.Button(root, text="Show Traffic Chart", command=self.show_traffic_chart).pack(pady=5)
+        ttk.Button(root, text="Show Summary Stats", command=self.show_summary_stats).pack(pady=5)
+        ttk.Button(root, text="Toggle Dark Mode", command=self.toggle_dark_mode).pack(pady=5)
+
+    def get_ip_location(self, ip):
+        try:
+            response = requests.get(f"http://ip-api.com/json/{ip}")
+            if response.status_code == 200:
+                data = response.json()
+                return f"{data['city']}, {data['regionName']}, {data['country']} (Lat: {data['lat']}, Lon: {data['lon']})"
+        except Exception as e:
+            print(f"Geolocation failed for IP {ip}: {e}")
+        return "Location not found"
+
+    def toggle_dark_mode(self):
+        style = ttk.Style()
+        current = style.theme_use()
+        style.theme_use("alt" if current == "default" else "default")
+
+    def show_summary_stats(self):
+        if self.filtered_data is None:
+            messagebox.showinfo("Summary", "No data to summarize.")
+            return
+        total_requests = len(self.filtered_data)
+        unique_ips = self.filtered_data['IP'].nunique()
+        top_ip = self.filtered_data['IP'].value_counts().idxmax()
+        top_count = self.filtered_data['IP'].value_counts().max()
+        summary = (
+            f"Total Requests: {total_requests}\n"
+            f"Unique IPs: {unique_ips}\n"
+            f"Top IP: {top_ip} ({top_count} requests)"
+        )
+        messagebox.showinfo("Summary Stats", summary)
+
+    def show_traffic_chart(self):
+        if self.filtered_data is None or self.filtered_data.empty:
+            messagebox.showwarning("Warning", "No data available for chart.")
+            return
+        traffic_series = self.filtered_data['Timestamp'].dt.floor('1Min').value_counts().sort_index()
+        window = tk.Toplevel(self.root)
+        window.title("Traffic Over Time")
+        window.geometry("800x600")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        traffic_series.plot(kind='line', ax=ax)
+        ax.set_title("Requests per Minute")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Number of Requests")
+        ax.grid(True)
+        canvas = FigureCanvasTkAgg(fig, master=window)
+        canvas.draw()
+        canvas.get_tk_widget().pack(expand=True, fill='both')
+
+    def load_log(self):
+        filepath = filedialog.askopenfilename(filetypes=[("Log files", "*.log"), ("All files", "*.*")])
+        if not filepath:
+            return
+        log_data = []
+        try:
+            with open(filepath, 'r') as file:
+                for line in file:
+                    match = LOG_PATTERN.match(line)
+                    if match:
+                        timestamp_str = match.group('timestamp').split()[0]
+                        timestamp = datetime.strptime(timestamp_str, '%d/%b/%Y:%H:%M:%S')
+                        log_data.append({
+                            'Timestamp': timestamp,
+                            'IP': match.group('ip'),
+                            'Method': match.group('method'),
+                            'Response': match.group('response')
+                        })
+        except Exception as e:
+            messagebox.showerror("Error", f"Error loading log file:\n{e}")
+            return
+        self.data = pd.DataFrame(log_data)
+        self.filtered_data = self.data.copy()
+        self.display_data()
+
+    def display_data(self, data=None):
+        self.tree.delete(*self.tree.get_children())
+        data_to_show = data if data is not None else self.filtered_data
+        if data_to_show is not None:
+            for _, row in data_to_show.iterrows():
+                self.tree.insert('', 'end', values=(row['Timestamp'], row['IP'], row['Method'], row['Response']))
+
+    def filter_datetime(self):
+        if self.data is None:
+            messagebox.showwarning("Warning", "Please load a log file first.")
+            return
+        try:
+            start_dt = datetime.strptime(
+                f"{self.start_date.get()} {self.start_hour.get()}:{self.start_minute.get()}:{self.start_second.get()}",
+                "%d/%m/%Y %H:%M:%S")
+            end_dt = datetime.strptime(
+                f"{self.end_date.get()} {self.end_hour.get()}:{self.end_minute.get()}:{self.end_second.get()}",
+                "%d/%m/%Y %H:%M:%S")
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid Date-Time Format:\n{e}")
+            return
+        self.filtered_data = self.data[(self.data['Timestamp'] >= start_dt) & (self.data['Timestamp'] <= end_dt)]
+        self.display_data(self.filtered_data)
+
+    def detect_spike(self):
+        if self.data is None:
+            messagebox.showwarning("Warning", "Please load a log file first.")
+            return
+        self.data['TimeBucket'] = self.data['Timestamp'].dt.floor('500ms')
+        grouped = self.data.groupby(['TimeBucket', 'IP']).size().reset_index(name='Count')
+        spikes = grouped[grouped['Count'] > 5]
+
+        if not spikes.empty:
+            messagebox.showwarning("Spike Alert", f"High traffic volume detected!\n{len(spikes)} potential spikes found.")
+
+        window = tk.Toplevel(self.root)
+        window.title("Traffic Volume Spike")
+        window.geometry("800x600")
+
+        text_widget = tk.Text(window, wrap='none')
+        text_widget.pack(expand=True, fill='both')
+        text_widget.insert('end', "Traffic from multiple IP addresses :\n\n")
+        header_line = f"{'Timestamp':<30} {'IP Address':<30} {'Request Count':<15}\n"
+        text_widget.insert('end', header_line)
+        text_widget.insert('end', '-'*80 + "\n")
+        for _, row in spikes.iterrows():
+            line = f"{str(row['TimeBucket']):<30} {row['IP']:<30} {row['Count']:<15}\n"
+            text_widget.insert('end', line)
+        text_widget.config(state='disabled')
+
+        def export_spike():
+            export_data = spikes.drop(columns=['TimeBucket'], errors='ignore')
+            filepath = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+            if filepath:
+                spikes.to_csv(filepath, index=False)
+                messagebox.showinfo("Export", f"Traffic spike data exported to:\n{filepath}")
+
+        ttk.Button(window, text="Export to CSV", command=export_spike).pack(pady=5)
+
+    def detect_ip_abuse(self):
+        if self.data is None:
+            messagebox.showwarning("Warning", "Please load a log file first.")
+            return
+        flagged_ips = {}
+        time_window = timedelta(seconds=5)
+        for ip, group in self.data.groupby('IP'):
+            times = group['Timestamp'].sort_values()
+            for i in range(1, len(times)):
+                if (times.iloc[i] - times.iloc[i - 1]) <= time_window:
+                    flagged_ips[ip] = len(group)
+                    break
+
+        sorted_ips = sorted(flagged_ips.items(), key=lambda x: x[1], reverse=True)
+
+        window = tk.Toplevel(self.root)
+        window.title("Frequent IPs")
+        window.geometry("600x500")
+        text = tk.Text(window)
+        text.pack(expand=True, fill='both')
+        if sorted_ips:
+            text.insert('end', "Multiple requests from the same IP addresses :\n\n")
+            text.insert('end', f"{'IP Address':<30} {'Request Count':<15} Location\n")
+            text.insert('end', '-' * 90 + "\n")
+            for ip, count in sorted_ips:
+                location = self.get_ip_location(ip)
+                text.insert('end', f"{ip:<30} {count:<15} {location}\n")
+        else:
+            text.insert('end', "No suspicious IPs found.")
+        text.config(state='disabled')
+
+        def export_ip_abuse():
+            if not sorted_ips:
+                messagebox.showinfo("Export", "No data to export.")
+                return
+            data = []
+            for ip, count in sorted_ips:
+                location = self.get_ip_location(ip)
+                data.append([ip, count, location])
+            df = pd.DataFrame(data, columns=['Suspicious IP', 'Request Count', 'Location'])
+            filepath = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+            if filepath:
+                df.to_csv(filepath, index=False)
+                messagebox.showinfo("Export", f"Suspicious IPs exported to:\n{filepath}")
+
+        ttk.Button(window, text="Export to CSV", command=export_ip_abuse).pack(pady=5)
+
+    def export_csv(self):
+        if self.filtered_data is None:
+            messagebox.showwarning("Warning", "Please apply filter or load a log file first.")
+            return
+        data_to_export = self.filtered_data.copy()
+        if 'TimeBucket' in data_to_export.columns:
+            data_to_export.drop(columns=['TimeBucket'], inplace=True)
+        filepath = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+        if not filepath:
+            return
+        data_to_export.to_csv(filepath, index=False)
+        messagebox.showinfo("Export", f"Data exported successfully to:\n{filepath}")
+
+    def clear_logs(self):
+        self.data = None
+        self.filtered_data = None
+        self.tree.delete(*self.tree.get_children())
+        messagebox.showinfo("Cleared", "Logs cleared successfully.")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = DDoSAnalyzer(root)
+    root.geometry("950x700")
+    root.mainloop()
