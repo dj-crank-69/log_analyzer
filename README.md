@@ -4,6 +4,6 @@ you can open Text editor (ubuntu) and paste the code
 
 save as name : log_analyzer.py
 
-whereever you upload any csv log file it will extract ips and geo-location 
+when ever you upload any log.csv file it will extract ips and geo-location 
  
 
